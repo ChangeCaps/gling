@@ -1,0 +1,53 @@
+[package]
+name = "gling"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kira = "0.12"
+eyre = "0.6"
+gtk4 = "0.11"
+ron = "0.12"
+
+[dependencies.uuid]
+version = "1"
+features = ["v4", "serde"]
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[dependencies.tokio]
+version = "1"
+features = ["time"]
+
+[dependencies.rand]
+version = "0.10"
+features = ["thread_rng"]
+
+[dependencies.ori-native]
+git = "https://github.com/ori-ui/ori-native"
+
+[profile.dev.package.kira]
+opt-level = 3
+
+[profile.dev.package.cpal]
+opt-level = 3
+
+[profile.dev.package.symphonia]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
