@@ -1,6 +1,8 @@
 use ori_native::prelude::*;
 
 pub const BACKGROUND: Color = Color::hex("#faf8f8");
+pub const SURFACE: Color = Color::hex("#eae8e8");
+pub const SURFACE_DARK: Color = Color::hex("#dad8d8");
 pub const OUTLINE: Color = Color::hex("#222222");
 pub const ACCENT: Color = Color::hex("#22aa22");
 pub const TEXT: Color = Color::hex("#222222");

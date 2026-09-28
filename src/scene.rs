@@ -1,6 +1,8 @@
 use std::{
     ffi::OsStr,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use ::gtk4::{
@@ -8,12 +10,12 @@ use ::gtk4::{
     prelude::{FileChooserExt, NativeDialogExt},
 };
 use kira::{
-    Tween,
+    Mix, Tween, Value,
+    effect::reverb::{ReverbBuilder, ReverbHandle},
     sound::static_sound::{StaticSoundData, StaticSoundHandle},
-    track::TrackHandle,
+    track::{TrackBuilder, TrackHandle},
 };
 use ori_native::prelude::*;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{Audio, button, icon, label, slider, storage::v1, theme, uuid_map::UuidMap};
@@ -34,20 +36,24 @@ pub struct Sound {
     pub name: String,
     pub gain: f32,
 
-    pub kind: Kind,
-    pub rate: f32,
+    pub reverb: Reverb,
+
+    pub kind: v1::Kind,
+    pub random: v1::Random,
+
+    pub expand: bool,
 
     pub path: Option<PathBuf>,
     pub data: Option<StaticSoundData>,
     pub handle: Option<StaticSoundHandle>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Kind {
-    Music,
-    Ambient,
-    Random,
-    Trigger,
+pub struct Reverb {
+    pub handle: ReverbHandle,
+    pub feedback: f32,
+    pub damping: f32,
+    pub width: f32,
+    pub mix: f32,
 }
 
 impl Scene {
@@ -143,10 +149,16 @@ impl Master {
 
 impl Sound {
     pub fn new(parent: &mut TrackHandle) -> eyre::Result<Self> {
-        Self::from_data_v1(parent, Default::default())
+        let mut sound = Self::from_data_v1(parent, Default::default())?;
+        sound.expand = true;
+
+        Ok(sound)
     }
 
     pub fn from_data_v1(parent: &mut TrackHandle, data: v1::Sound) -> eyre::Result<Self> {
+        let mut builder = TrackBuilder::new();
+        let reverb = Reverb::from_data_v1(&mut builder, data.reverb);
+
         Ok(Self {
             data: data
                 .path
@@ -154,12 +166,16 @@ impl Sound {
                 .map(StaticSoundData::from_file)
                 .transpose()?,
 
-            track: parent.add_sub_track(Default::default())?,
+            track: parent.add_sub_track(builder)?,
             name: data.name,
             gain: data.gain,
 
+            reverb,
+
             kind: data.kind,
-            rate: data.rate,
+            random: data.random,
+
+            expand: false,
 
             path: data.path,
 
@@ -171,13 +187,14 @@ impl Sound {
         v1::Sound {
             name: self.name.clone(),
             gain: self.gain,
+            reverb: self.reverb.to_data_v1(),
             kind: self.kind,
-            rate: self.rate,
+            random: self.random.clone(),
             path: self.path.clone(),
         }
     }
 
-    fn set_kind(&mut self, kind: Kind, position: f64) {
+    fn set_kind(&mut self, kind: v1::Kind, position: f64) {
         if !kind.is_looping() {
             self.stop();
         }
@@ -193,11 +210,21 @@ impl Sound {
     }
 
     fn tick(&mut self) {
-        if self.kind == Kind::Random
-            && rand::random::<f32>() < self.rate
+        if self.kind == v1::Kind::Random
+            && rand::random::<f32>() < self.random.rate
             && let Some(ref data) = self.data
-            && let Ok(handle) = self.track.play(data.clone())
+            && let Ok(mut handle) = self.track.play(data.clone())
         {
+            if self.random.volume < 0.0 {
+                let volume = rand::random_range(self.random.volume..=0.0);
+                handle.set_volume(volume, Default::default());
+            }
+
+            if self.random.panning > 0.0 {
+                let panning = rand::random_range(-self.random.panning..=self.random.panning);
+                handle.set_panning(panning, Default::default());
+            }
+
             self.handle = Some(handle);
         }
     }
@@ -227,66 +254,91 @@ impl Sound {
     }
 }
 
-impl Kind {
-    pub fn is_looping(&self) -> bool {
-        matches!(self, Self::Music | Self::Ambient)
+impl Reverb {
+    pub fn from_data_v1(builder: &mut TrackBuilder, data: v1::Reverb) -> Self {
+        let handle = builder.add_effect(ReverbBuilder {
+            feedback: Value::Fixed(data.feedback as f64),
+            damping: Value::Fixed(data.damping as f64),
+            stereo_width: Value::Fixed(data.width as f64),
+            mix: Value::Fixed(Mix(data.mix)),
+        });
+
+        Self {
+            handle,
+            feedback: data.feedback,
+            damping: data.damping,
+            width: data.width,
+            mix: data.mix,
+        }
+    }
+
+    pub fn to_data_v1(&self) -> v1::Reverb {
+        v1::Reverb {
+            feedback: self.feedback,
+            damping: self.damping,
+            width: self.width,
+            mix: self.mix,
+        }
     }
 }
 
-pub fn scene(scene: &Scene) -> impl View<Scene> + use<> {
+pub fn scene(scene: &Scene) -> impl View<Scene> + Layout + use<> {
     let name = row(textinput()
         .text(&scene.name)
         .placeholder("...")
         .size(20.0)
         .color(theme::TEXT)
         .family(theme::FONT)
-        .newline(Newline::None)
+        .newline(Newline::Never)
         .align(TextAlign::Center)
-        .width(200.0)
+        .width(400.0)
         .accept_tab(false)
         .on_change(|scene: &mut Scene, name| scene.name = name))
-    .border_bottom(1.0, theme::OUTLINE);
+    .border_bottom(1.0, theme::OUTLINE)
+    .margin(20.0);
 
-    column((name, sounds(scene), mixer(scene)))
+    column((name, column(()).flex(1.0), mixer(scene)))
+        .align_items(Align::Center)
         .gap(40.0)
         .padding(20.0)
-        .min_width(0.0)
-        .justify_content(Justify::Center)
-        .align_items(Align::Center)
         .flex(1.0)
 }
 
-fn sounds(scene: &Scene) -> impl View<Scene> + Layout + use<> {
-    let sounds = scene.sounds.iter().map(|(id, sound)| {
-        let sound = self::sound(id, sound);
-        (id, sound)
-    });
+pub fn right_bar(scene: &Scene) -> impl View<Scene> + use<> {
+    sounds(scene)
+}
 
-    section(
-        "Sounds",
-        hscroll(row((keyed(sounds), add_sound())).align_items(Align::Center)).max_width(Fract(1.0)),
+fn sounds(scene: &Scene) -> impl View<Scene> + Layout + use<> {
+    column(
+        list(scene.sounds.len() + 1, |scene: &Scene, i| {
+            if let Some(id) = scene.sounds.get_uuid(i) {
+                any(sound(id, &scene.sounds[id]))
+            } else {
+                any(add_sound())
+            }
+        })
+        .flex(1.0)
+        .gap(8.0),
     )
-    .max_width(Fract(1.0))
+    .min_height(0.0)
+    .width(400.0)
+    .padding(8.0)
+    .shadow(0.0, 0.0, 12.0, Color::BLACK.fade(0.3))
 }
 
 fn add_sound() -> impl View<Scene> + use<> {
-    button::button(
-        icon::icon(include_bytes!("icon/plus.svg")),
-        |scene: &mut Scene| {
-            let _ = scene.add_sound();
-        },
-    )
+    row(button::button(icon::plus(), |scene: &mut Scene| {
+        let _ = scene.add_sound();
+    }))
+    .justify_content(Justify::Center)
 }
 
 fn remove_sound(id: Uuid) -> impl View<Scene> + use<> {
-    button::button(
-        icon::icon(include_bytes!("icon/trash.svg")).tint(theme::RED),
-        move |scene: &mut Scene| {
-            if let Some(mut sound) = scene.sounds.remove(id) {
-                sound.stop();
-            }
-        },
-    )
+    button::button(icon::trash().tint(theme::RED), move |scene: &mut Scene| {
+        if let Some(mut sound) = scene.sounds.remove(id) {
+            sound.stop();
+        }
+    })
     .padding(6.0)
 }
 
@@ -296,44 +348,59 @@ fn sound(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
         .color(theme::TEXT)
         .family(theme::FONT)
         .size(12.0)
-        .newline(Newline::None)
+        .newline(Newline::Never)
         .accept_tab(false)
         .on_change(move |scene: &mut Scene, text| scene.sounds[id].name = text)
         .flex(1.0);
 
     let properties = match sound.kind {
-        Kind::Music => properties(()),
-        Kind::Ambient => properties(()),
-        Kind::Random => properties(probability(id, sound)),
-        Kind::Trigger => properties(()),
+        v1::Kind::Music => any(column(reverb_properties(id, sound))),
+        v1::Kind::Ambient => any(column(reverb_properties(id, sound))),
+        v1::Kind::Random => any(column((
+            random_properties(id, sound),
+            reverb_properties(id, sound),
+        ))),
+        v1::Kind::Trigger => any(column(reverb_properties(id, sound))),
     };
 
-    column((
-        column((
-            row((
-                row(name).border_bottom(1.0, theme::OUTLINE).flex(1.0),
-                remove_sound(id),
-            ))
-            .align_self(Align::Stretch)
-            .align_items(Align::Center)
-            .gap(6.0),
-            row(kind(id, sound)),
-        ))
-        .align_self(Align::Stretch)
-        .align_items(Align::Center),
-        properties,
-        select_file(id, sound),
+    let header = row((
+        row((expand(id, sound), remove_sound(id))),
+        row(name)
+            .padding_bottom(-2.0)
+            .border_bottom(1.0, theme::OUTLINE)
+            .flex(1.0),
     ))
-    .height(300.0)
-    .margin(10.0)
-    .padding(16.0)
-    .corner(12.0)
-    .justify_content(Justify::SpaceBetween)
-    .shadow(0.0, 0.0, 12.0, Color::BLACK.fade(0.3))
+    .align_self(Align::Stretch)
+    .align_items(Align::Center)
+    .gap(12.0);
+
+    let body = match sound.expand {
+        true => Some((row(kind(id, sound)), properties, select_file(id, sound))),
+        false => None,
+    };
+
+    column((header, body))
+        .padding(6.0)
+        .background(theme::SURFACE)
+}
+
+fn expand(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    let icon = match sound.expand {
+        true => icon::eye(),
+        false => icon::eye_closed(),
+    };
+
+    button::button(
+        icon.size(24.0, 24.0).tint(theme::TEXT),
+        move |scene: &mut Scene| {
+            scene.sounds[id].expand ^= true;
+        },
+    )
+    .padding(6.0)
 }
 
 fn kind(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
-    let button = |kind, icon| {
+    let button = |kind| {
         let color = match sound.kind == kind {
             true => theme::ACCENT,
             false => theme::TEXT.fade(0.5),
@@ -341,7 +408,7 @@ fn kind(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 
         transition(color, Ease(0.1), move |_, color| {
             button::button(
-                icon::icon(icon).size(24.0, 24.0).tint(color),
+                kind_icon(kind).size(24.0, 24.0).tint(color),
                 move |scene: &mut Scene| {
                     let position = scene.position();
                     scene.sounds[id].set_kind(kind, position);
@@ -352,39 +419,229 @@ fn kind(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     };
 
     row((
-        button(Kind::Trigger, include_bytes!("icon/crosshair.svg")),
-        button(Kind::Random, include_bytes!("icon/die.svg")),
-        button(Kind::Ambient, include_bytes!("icon/cactus.svg")),
-        button(Kind::Music, include_bytes!("icon/notes.svg")),
+        button(v1::Kind::Trigger),
+        button(v1::Kind::Random),
+        button(v1::Kind::Ambient),
+        button(v1::Kind::Music),
     ))
 }
 
-fn properties<T>(content: impl ViewSeq<T> + 'static) -> BoxedView<T>
+fn kind_icon(kind: v1::Kind) -> Image {
+    match kind {
+        v1::Kind::Trigger => icon::target(),
+        v1::Kind::Random => icon::die(),
+        v1::Kind::Ambient => icon::cactus(),
+        v1::Kind::Music => icon::notes(),
+    }
+}
+
+fn properties<T, V>(title: &str, content: V) -> impl View<T> + use<T, V>
 where
     T: 'static,
+    V: ViewSeq<T> + 'static,
 {
-    any(column(content).padding(4.0).flex(1.0))
+    any(column((
+        label(title).size(12.0),
+        column(content).padding(4.0).flex(1.0),
+    ))
+    .padding(8.0))
 }
 
-fn probability(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
-    let probability = format!("{:.1}", 1.0 / sound.rate);
+fn random_properties(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    properties(
+        "Random",
+        (
+            random_rate(id, sound),
+            random_volume(id, sound),
+            random_panning(id, sound),
+        ),
+    )
+}
+
+fn random_rate(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "rate",
+        1.0 / sound.random.rate,
+        0.1..=500.0,
+        Space::Log,
+        move |scene, value| {
+            scene.sounds[id].random.rate = 1.0 / value;
+        },
+    )
+}
+
+fn random_volume(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "volume",
+        sound.random.volume,
+        -60.0..=0.0,
+        Space::Linear,
+        move |scene, value| {
+            scene.sounds[id].random.volume = value;
+        },
+    )
+}
+
+fn random_panning(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "panning",
+        sound.random.panning,
+        0.0..=1.0,
+        Space::Linear,
+        move |scene, value| {
+            scene.sounds[id].random.panning = value;
+        },
+    )
+}
+
+fn reverb_properties(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    properties(
+        "Reverb",
+        (
+            reverb_feedback(id, sound),
+            reverb_damping(id, sound),
+            reverb_width(id, sound),
+            reverb_mix(id, sound),
+        ),
+    )
+}
+
+fn reverb_feedback(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "feedback",
+        sound.reverb.feedback,
+        0.0..=1.0,
+        Space::Square,
+        move |scene, value| {
+            scene.sounds[id].reverb.feedback = value;
+            scene.sounds[id]
+                .reverb
+                .handle
+                .set_feedback(value as f64, Default::default());
+        },
+    )
+}
+
+fn reverb_damping(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "damping",
+        sound.reverb.damping,
+        0.0..=1.0,
+        Space::Linear,
+        move |scene, value| {
+            scene.sounds[id].reverb.damping = value;
+            scene.sounds[id]
+                .reverb
+                .handle
+                .set_damping(value as f64, Default::default());
+        },
+    )
+}
+
+fn reverb_width(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "width",
+        sound.reverb.width,
+        0.0..=1.0,
+        Space::Linear,
+        move |scene, value| {
+            scene.sounds[id].reverb.width = value;
+            scene.sounds[id]
+                .reverb
+                .handle
+                .set_stereo_width(value as f64, Default::default());
+        },
+    )
+}
+
+fn reverb_mix(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "mix",
+        sound.reverb.mix,
+        0.0..=1.0,
+        Space::Linear,
+        move |scene, value| {
+            scene.sounds[id].reverb.mix = value;
+            scene.sounds[id]
+                .reverb
+                .handle
+                .set_mix(Mix(value), Default::default());
+        },
+    )
+}
+
+fn property<F>(
+    name: &str,
+    value: f32,
+    range: RangeInclusive<f32>,
+    space: Space,
+    on_input: F,
+) -> impl View<Scene> + use<F>
+where
+    F: Fn(&mut Scene, f32) + 'static,
+{
+    let on_input = Rc::new(on_input);
 
     row((
-        label("rate: ").size(10.0),
-        textinput()
-            .text(probability)
-            .size(10.0)
-            .color(theme::TEXT)
-            .family(theme::FONT)
-            .newline(Newline::None)
-            .accept_tab(false)
-            .width(40.0)
-            .on_submit(move |scene: &mut Scene, value| {
-                if let Ok(value) = value.parse::<f32>() {
-                    scene.sounds[id].rate = (1.0 / value).clamp(0.0, 1.0);
-                }
+        label(name).size(10.0).flex(3.0).flex_basis(0.0),
+        numberinput(&format!("{value:.1}"), {
+            let range = range.clone();
+            let on_input = on_input.clone();
+
+            move |scene, value| {
+                on_input(scene, value.clamp(*range.start(), *range.end()));
+            }
+        })
+        .flex(2.0)
+        .flex_basis(0.0),
+        slider::slider()
+            .value({
+                let value = space.map(value);
+                let start = space.map(*range.start());
+                let end = space.map(*range.end());
+
+                (value - start) / (end - start)
+            })
+            .direction(Direction::Horizontal)
+            .knob_radius(8.0)
+            .track_length(80.0)
+            .padding(8.0)
+            .flex(7.0)
+            .flex_basis(0.0)
+            .on_input(move |scene, value| {
+                let start = space.map(*range.start());
+                let end = space.map(*range.end());
+
+                let value = value * (end - start) + start;
+                let value = space.inverse(value);
+                on_input(scene, value);
             }),
     ))
+    .align_items(Align::Center)
+}
+
+enum Space {
+    Linear,
+    Square,
+    Log,
+}
+
+impl Space {
+    fn map(&self, x: f32) -> f32 {
+        match self {
+            Space::Linear => x,
+            Space::Square => x * x,
+            Space::Log => x.ln(),
+        }
+    }
+
+    fn inverse(&self, x: f32) -> f32 {
+        match self {
+            Space::Linear => x,
+            Space::Square => x.sqrt(),
+            Space::Log => x.exp(),
+        }
+    }
 }
 
 fn select_file(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
@@ -400,14 +657,15 @@ fn select_file(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     effect(
         button::button(
             row((
-                icon::icon(include_bytes!("icon/folder.svg")).size(20.0, 20.0),
+                icon::folder().size(20.0, 20.0),
                 row(label(path).size(10.0))
-                    .width(200.0)
                     .border_bottom(1.0, theme::OUTLINE)
-                    .overflow(Overflow::Hidden),
+                    .overflow(Overflow::Hidden)
+                    .flex(1.0),
             ))
             .align_items(Align::Center)
-            .gap(4.0),
+            .gap(4.0)
+            .flex(1.0),
             move |_| {
                 Action::task(move |proxy| {
                     let chooser = ::gtk4::FileChooserNative::builder()
@@ -507,27 +765,19 @@ fn gain_slider(name: &str, gain: f32) -> impl View<(f32, TrackHandle)> + use<> {
         slider::slider()
             .value((gain - MIN) / RANGE)
             .direction(Direction::Vertical)
+            .track_length(200.0)
             .on_input(|(gain, track): &mut (f32, TrackHandle), value| {
                 *gain = value * RANGE + MIN;
                 track.set_volume(*gain, Tween::default());
             })
             .flex(1.0),
         column((
-            textinput()
-                .text(text)
-                .color(theme::TEXT)
-                .family(theme::FONT)
-                .size(10.0)
-                .on_submit(|(gain, track): &mut (f32, TrackHandle), value| {
-                    if let Ok(value) = value.parse::<f32>() {
-                        *gain = value.clamp(MIN, MAX);
-                        track.set_volume(*gain, Tween::default());
-                    }
-                })
-                .align(TextAlign::Center)
-                .newline(Newline::None)
-                .accept_tab(false)
-                .align_self(Align::Stretch),
+            numberinput(&text, |(gain, track): &mut (f32, TrackHandle), value| {
+                *gain = value.clamp(MIN, MAX);
+                track.set_volume(*gain, Tween::default());
+            })
+            .align(TextAlign::Center)
+            .align_self(Align::Stretch),
             label("dB").size(10.0),
         ))
         .align_items(Align::Center)
@@ -536,4 +786,28 @@ fn gain_slider(name: &str, gain: f32) -> impl View<(f32, TrackHandle)> + use<> {
     .justify_content(Justify::Stretch)
     .align_items(Align::Center)
     .width(60.0)
+}
+
+fn numberinput<T, A>(x: &str, mut on_input: impl FnMut(&mut T, f32) -> A + 'static) -> TextInput<T>
+where
+    A: Into<Action>,
+{
+    let x = x.to_string();
+
+    textinput()
+        .text(x.clone())
+        .color(theme::TEXT)
+        .family(theme::FONT)
+        .size(10.0)
+        .on_edited(move |data, value| {
+            if x != value
+                && let Ok(value) = value.parse::<f32>()
+            {
+                on_input(data, value).into()
+            } else {
+                Action::new()
+            }
+        })
+        .newline(Newline::Never)
+        .accept_tab(false)
 }

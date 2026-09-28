@@ -15,6 +15,7 @@ pub struct Slider<T> {
     knob_width: f32,
     padding: f32,
     flex: f32,
+    flex_basis: Option<Length>,
     direction: Direction,
 
     #[allow(clippy::type_complexity)]
@@ -25,13 +26,14 @@ impl<T> Slider<T> {
     pub fn new() -> Self {
         Self {
             value: None,
-            track_length: Length::Length(200.0),
+            track_length: Length::Fract(1.0),
             track_width: theme::slider::TRACK_WIDTH,
             knob_radius: theme::slider::KNOB_RADIUS,
             knob_width: theme::slider::KNOB_WIDTH,
             padding: theme::slider::PADDING,
             direction: Direction::Horizontal,
             flex: 0.0,
+            flex_basis: None,
             on_input: Box::new(|_, _| Action::new()),
         }
     }
@@ -46,6 +48,16 @@ impl<T> Slider<T> {
         self
     }
 
+    pub fn knob_radius(mut self, radius: f32) -> Self {
+        self.knob_radius = radius;
+        self
+    }
+
+    pub fn padding(mut self, padding: f32) -> Self {
+        self.padding = padding;
+        self
+    }
+
     pub fn direction(mut self, direction: Direction) -> Self {
         self.direction = direction;
         self
@@ -53,6 +65,11 @@ impl<T> Slider<T> {
 
     pub fn flex(mut self, flex: f32) -> Self {
         self.flex = flex;
+        self
+    }
+
+    pub fn flex_basis(mut self, basis: impl Into<Length>) -> Self {
+        self.flex_basis = Some(basis.into());
         self
     }
 
@@ -87,28 +104,37 @@ where
             move |_, _| {
                 effect(
                     pressable(move |(state, _): &(State, _), press| {
+                        let inner = match self.direction {
+                            Direction::Horizontal => row(())
+                                .background(theme::OUTLINE)
+                                .height(Fract(1.0))
+                                .width(Fract(state.progress)),
+                            Direction::Vertical => column(())
+                                .background(theme::OUTLINE)
+                                .width(Fract(1.0))
+                                .height(Fract(state.progress)),
+                        };
+
                         let (width, height) = match self.direction {
                             Direction::Horizontal => (self.track_length, self.track_width.into()),
                             Direction::Vertical => (self.track_width.into(), self.track_length),
                         };
 
+                        let justify = match self.direction {
+                            Direction::Horizontal => Justify::Start,
+                            Direction::Vertical => Justify::End,
+                        };
+
                         let track = on_layout(
-                            column(match self.direction {
-                                Direction::Horizontal => row(())
-                                    .background(theme::OUTLINE)
-                                    .height(Fract(1.0))
-                                    .width(Fract(state.progress)),
-                                Direction::Vertical => column(())
-                                    .background(theme::OUTLINE)
-                                    .width(Fract(1.0))
-                                    .height(Fract(state.progress)),
-                            })
-                            .size(width, height)
-                            .corner(self.track_width / 2.0)
-                            .flex(self.flex)
-                            .justify_content(Justify::End)
-                            .overflow(Overflow::Hidden)
-                            .background(theme::OUTLINE.lighten(0.5)),
+                            flex(inner)
+                                .direction(self.direction)
+                                .width(width)
+                                .height(height)
+                                .corner(self.track_width / 2.0)
+                                .flex(self.flex)
+                                .justify_content(justify)
+                                .overflow(Overflow::Hidden)
+                                .background(theme::OUTLINE.lighten(0.5)),
                             move |(state, _): &mut (State, _), width, height| {
                                 state.track_length = match self.direction {
                                     Direction::Horizontal => width,
@@ -137,11 +163,15 @@ where
                             Direction::Vertical => knob.bottom(inset),
                         };
 
-                        column((track, knob))
-                            .justify_content(Justify::Center)
+                        let mut view = flex((track, knob))
+                            .direction(self.direction)
                             .align_items(Align::Center)
                             .padding(self.padding)
-                            .flex(self.flex)
+                            .flex(self.flex);
+
+                        view.get_layout_style_mut().flex_basis = self.flex_basis;
+
+                        view
                     })
                     .on_event(move |(state, data), event| match event {
                         PressableEvent::Pressed(event) => {

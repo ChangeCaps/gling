@@ -65,7 +65,9 @@ impl Data {
     }
 
     fn tick(&mut self) {
-        if let Some(id) = self.selected_scene {
+        if let Some(id) = self.selected_scene
+            && self.is_playing
+        {
             self.scenes[id].tick();
         }
     }
@@ -130,14 +132,14 @@ fn label(label: impl Into<String>) -> Text {
 fn ui(data: &Data) -> impl Effect<Data> + use<> {
     effect(
         window(
-            row((
-                column((top_bar(data), selected_scene(data)))
-                    .min_width(0.0)
-                    .flex(1.0),
-                scenes(data),
+            column((
+                row((left_bar(data), selected_scene(data), right_bar(data)))
+                    .flex(1.0)
+                    .min_height(0.0),
+                top_bar(data),
             ))
+            .min_height(0.0)
             .reverse(true)
-            .min_width(0.0)
             .flex(1.0)
             .background(theme::BACKGROUND),
         ),
@@ -162,21 +164,31 @@ fn selected_scene(data: &Data) -> impl View<Data> + use<> {
             scene::scene(&data.scenes[uuid]),
             move |data: &mut Data, map| map(&mut data.scenes[uuid]),
         )),
-        None => any(row(())),
+        None => any(row(()).flex(1.0)),
     }
+}
+
+fn right_bar(data: &Data) -> Option<impl View<Data> + use<>> {
+    data.selected_scene.map(|id| {
+        map(
+            scene::right_bar(&data.scenes[id]),
+            move |data: &mut Data, map| map(&mut data.scenes[id]),
+        )
+    })
 }
 
 fn top_bar(data: &Data) -> impl View<Data> + use<> {
     row(pause_play_rewind(data))
         .justify_content(Justify::Center)
         .align_items(Align::Center)
-        .padding(20.0)
         .align_self(Align::Stretch)
-        .shadow(0.0, 0.0, 12.0, Color::BLACK.fade(0.3))
+        .padding(20.0)
         .min_width(500.0)
+        .background(theme::BACKGROUND)
+        .shadow(0.0, 0.0, 12.0, Color::BLACK.fade(0.3))
 }
 
-fn scenes(data: &Data) -> impl View<Data> + use<> {
+fn left_bar(data: &Data) -> impl View<Data> + use<> {
     column((
         list(data.scenes.len(), |data: &Data, i| {
             let id = data.scenes.get_uuid(i).unwrap();
@@ -189,7 +201,7 @@ fn scenes(data: &Data) -> impl View<Data> + use<> {
     .align_items(Align::Center)
     .padding(20.0)
     .gap(12.0)
-    .width(200.0)
+    .width(400.0)
     .shadow(0.0, 0.0, 12.0, Color::BLACK.fade(0.3))
     .background(theme::BACKGROUND)
 }
@@ -211,12 +223,9 @@ fn scene_button(data: &Data, scene: &Scene, id: Uuid) -> impl View<Data> + use<>
 }
 
 fn add_scene() -> impl View<Data> + use<> {
-    button::button(
-        icon::icon(include_bytes!("icon/plus.svg")),
-        |data: &mut Data| {
-            let _ = data.add_scene();
-        },
-    )
+    button::button(icon::plus(), |data: &mut Data| {
+        let _ = data.add_scene();
+    })
 }
 
 fn pause_play_rewind(data: &Data) -> impl View<Data> + use<> {
@@ -224,14 +233,11 @@ fn pause_play_rewind(data: &Data) -> impl View<Data> + use<> {
 }
 
 fn rewind() -> impl View<Data> {
-    button::button(
-        icon::icon(include_bytes!("icon/rewind.svg")),
-        |data: &mut Data| {
-            if let Some(id) = data.selected_scene {
-                data.scenes[id].rewind();
-            }
-        },
-    )
+    button::button(icon::rewind(), |data: &mut Data| {
+        if let Some(id) = data.selected_scene {
+            data.scenes[id].rewind();
+        }
+    })
 }
 
 fn pause(data: &Data) -> impl View<Data> + use<> {
@@ -241,13 +247,10 @@ fn pause(data: &Data) -> impl View<Data> + use<> {
     };
 
     transition(color, Ease(0.05), |_, color| {
-        button::button(
-            icon::icon(include_bytes!("icon/pause.svg")).tint(color),
-            |data: &mut Data| {
-                data.audio.master.pause(Tween::default());
-                data.is_playing = false;
-            },
-        )
+        button::button(icon::pause().tint(color), |data: &mut Data| {
+            data.audio.master.pause(Tween::default());
+            data.is_playing = false;
+        })
     })
 }
 
@@ -258,12 +261,9 @@ fn play(data: &Data) -> impl View<Data> + use<> {
     };
 
     transition(color, Ease(0.05), |_, color| {
-        button::button(
-            icon::icon(include_bytes!("icon/play.svg")).tint(color),
-            |data: &mut Data| {
-                data.audio.master.resume(Tween::default());
-                data.is_playing = true;
-            },
-        )
+        button::button(icon::play().tint(color), |data: &mut Data| {
+            data.audio.master.resume(Tween::default());
+            data.is_playing = true;
+        })
     })
 }
