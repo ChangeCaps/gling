@@ -571,7 +571,7 @@ fn reverb_mix(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 }
 
 fn property<F>(
-    name: &str,
+    name: &'static str,
     value: f32,
     range: RangeInclusive<f32>,
     space: Space,
@@ -582,42 +582,44 @@ where
 {
     let on_input = Rc::new(on_input);
 
-    row((
-        label(name).size(10.0).flex(3.0).flex_basis(0.0),
-        numberinput(&format!("{value:.1}"), {
-            let range = range.clone();
-            let on_input = on_input.clone();
+    memo(value, move |_| {
+        row((
+            label(name).size(10.0).flex(3.0).flex_basis(0.0),
+            numberinput(&format!("{value:.1}"), {
+                let range = range.clone();
+                let on_input = on_input.clone();
 
-            move |scene, value| {
-                on_input(scene, value.clamp(*range.start(), *range.end()));
-            }
-        })
-        .flex(2.0)
-        .flex_basis(0.0),
-        slider::slider()
-            .value({
-                let value = space.map(value);
-                let start = space.map(*range.start());
-                let end = space.map(*range.end());
-
-                (value - start) / (end - start)
+                move |scene, value| {
+                    on_input(scene, value.clamp(*range.start(), *range.end()));
+                }
             })
-            .direction(Direction::Horizontal)
-            .knob_radius(8.0)
-            .track_length(80.0)
-            .padding(8.0)
-            .flex(7.0)
-            .flex_basis(0.0)
-            .on_input(move |scene, value| {
-                let start = space.map(*range.start());
-                let end = space.map(*range.end());
+            .flex(2.0)
+            .flex_basis(0.0),
+            slider::slider()
+                .value({
+                    let value = space.map(value);
+                    let start = space.map(*range.start());
+                    let end = space.map(*range.end());
 
-                let value = value * (end - start) + start;
-                let value = space.inverse(value);
-                on_input(scene, value);
-            }),
-    ))
-    .align_items(Align::Center)
+                    (value - start) / (end - start)
+                })
+                .direction(Direction::Horizontal)
+                .knob_radius(8.0)
+                .track_length(80.0)
+                .padding(8.0)
+                .flex(7.0)
+                .flex_basis(0.0)
+                .on_input(move |scene, value| {
+                    let start = space.map(*range.start());
+                    let end = space.map(*range.end());
+
+                    let value = value * (end - start) + start;
+                    let value = space.inverse(value);
+                    on_input(scene, value);
+                }),
+        ))
+        .align_items(Align::Center)
+    })
 }
 
 enum Space {
@@ -757,35 +759,39 @@ fn gain_slider(name: &str, gain: f32) -> impl View<(f32, TrackHandle)> + use<> {
         format!("{:.1}", gain)
     };
 
-    column((
-        label(name)
-            .size(12.0)
-            .wrap(TextWrap::Word)
-            .align(TextAlign::Center),
-        slider::slider()
-            .value((gain - MIN) / RANGE)
-            .direction(Direction::Vertical)
-            .track_length(200.0)
-            .on_input(|(gain, track): &mut (f32, TrackHandle), value| {
-                *gain = value * RANGE + MIN;
-                track.set_volume(*gain, Tween::default());
-            })
-            .flex(1.0),
+    let name = name.to_string();
+
+    memo(gain, move |_| {
         column((
-            numberinput(&text, |(gain, track): &mut (f32, TrackHandle), value| {
-                *gain = value.clamp(MIN, MAX);
-                track.set_volume(*gain, Tween::default());
-            })
-            .align(TextAlign::Center)
+            label(name)
+                .size(12.0)
+                .wrap(TextWrap::Word)
+                .align(TextAlign::Center),
+            slider::slider()
+                .value((gain - MIN) / RANGE)
+                .direction(Direction::Vertical)
+                .track_length(200.0)
+                .on_input(|(gain, track): &mut (f32, TrackHandle), value| {
+                    *gain = value * RANGE + MIN;
+                    track.set_volume(*gain, Tween::default());
+                })
+                .flex(1.0),
+            column((
+                numberinput(&text, |(gain, track): &mut (f32, TrackHandle), value| {
+                    *gain = value.clamp(MIN, MAX);
+                    track.set_volume(*gain, Tween::default());
+                })
+                .align(TextAlign::Center)
+                .align_self(Align::Stretch),
+                label("dB").size(10.0),
+            ))
+            .align_items(Align::Center)
             .align_self(Align::Stretch),
-            label("dB").size(10.0),
         ))
+        .justify_content(Justify::Stretch)
         .align_items(Align::Center)
-        .align_self(Align::Stretch),
-    ))
-    .justify_content(Justify::Stretch)
-    .align_items(Align::Center)
-    .width(60.0)
+        .width(60.0)
+    })
 }
 
 fn numberinput<T, A>(x: &str, mut on_input: impl FnMut(&mut T, f32) -> A + 'static) -> TextInput<T>

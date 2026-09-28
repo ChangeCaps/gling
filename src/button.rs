@@ -1,4 +1,4 @@
-use ori_native::{LayoutStyle, prelude::*};
+use ori_native::prelude::*;
 
 pub fn button<T, V, A>(contents: V, mut on_click: impl FnMut(&mut T) -> A + 'static) -> Button<T, V>
 where
@@ -31,8 +31,8 @@ impl<T, V> Padding for Button<T, V> {
     }
 }
 
-impl<T, V> BuildMarker for Button<T, V> {}
-impl<T, V> BuildView<Context, T> for Button<T, V>
+impl<T, V> BuilderMarker for Button<T, V> {}
+impl<T, V> Builder<Context, T> for Button<T, V>
 where
     T: 'static,
     V: View<T> + 'static,
