@@ -39,6 +39,7 @@ pub struct Master {
 pub struct Sound {
     pub name: String,
     pub gain: f32,
+    pub delay: Delay,
     pub reverb: Reverb,
     pub kind: Kind,
     pub random: Random,
@@ -50,6 +51,7 @@ impl Default for Sound {
         Self {
             name: String::from("new sound"),
             gain: 0.0,
+            delay: Delay::default(),
             reverb: Reverb::default(),
             kind: Kind::Trigger,
             random: Random::default(),
@@ -61,6 +63,7 @@ impl Default for Sound {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Random {
+    pub limit: u32,
     pub rate: f32,
     pub volume: f32,
     pub panning: f32,
@@ -69,9 +72,28 @@ pub struct Random {
 impl Default for Random {
     fn default() -> Self {
         Self {
+            limit: 64,
             rate: 0.05,
             volume: 0.0,
             panning: 0.5,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Delay {
+    pub time: f32,
+    pub feedback: f32,
+    pub mix: f32,
+}
+
+impl Default for Delay {
+    fn default() -> Self {
+        Self {
+            time: 0.5,
+            feedback: -6.0,
+            mix: 0.0,
         }
     }
 }
@@ -105,7 +127,20 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Kind::Music => "Music",
+            Kind::Ambient => "Ambient",
+            Kind::Random => "Random",
+            Kind::Trigger => "Trigger",
+        }
+    }
+
     pub fn is_looping(&self) -> bool {
         matches!(self, Self::Music | Self::Ambient)
+    }
+
+    pub fn is_triggered(&self) -> bool {
+        matches!(self, Self::Random | Self::Trigger)
     }
 }

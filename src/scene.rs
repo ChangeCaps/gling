@@ -3,6 +3,7 @@ use std::{
     ops::RangeInclusive,
     path::{Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 
 use ::gtk4::{
@@ -11,14 +12,28 @@ use ::gtk4::{
 };
 use kira::{
     Mix, Tween, Value,
-    effect::reverb::{ReverbBuilder, ReverbHandle},
-    sound::static_sound::{StaticSoundData, StaticSoundHandle},
+    effect::{
+        delay::{DelayBuilder, DelayHandle},
+        reverb::{ReverbBuilder, ReverbHandle},
+    },
+    sound::{
+        PlaybackState,
+        static_sound::{StaticSoundData, StaticSoundHandle},
+    },
     track::{TrackBuilder, TrackHandle},
 };
 use ori_native::prelude::*;
 use uuid::Uuid;
 
-use crate::{Audio, button, icon, label, slider, storage::v1, theme, uuid_map::UuidMap};
+use crate::{
+    Audio,
+    button::{self, Button},
+    icon, label,
+    slider::{self, Slider},
+    storage::v1,
+    theme, tooltip,
+    uuid_map::UuidMap,
+};
 
 pub struct Scene {
     pub name: String,
@@ -36,6 +51,7 @@ pub struct Sound {
     pub name: String,
     pub gain: f32,
 
+    pub delay: Delay,
     pub reverb: Reverb,
 
     pub kind: v1::Kind,
@@ -45,7 +61,14 @@ pub struct Sound {
 
     pub path: Option<PathBuf>,
     pub data: Option<StaticSoundData>,
-    pub handle: Option<StaticSoundHandle>,
+    pub handles: Vec<StaticSoundHandle>,
+}
+
+pub struct Delay {
+    pub handle: DelayHandle,
+    pub time: f32,
+    pub feedback: f32,
+    pub mix: f32,
 }
 
 pub struct Reverb {
@@ -94,7 +117,7 @@ impl Scene {
 
     pub fn rewind(&mut self) {
         for track in self.sounds.values_mut_unordered() {
-            if let Some(ref mut handle) = track.handle {
+            for handle in &mut track.handles {
                 handle.seek_to(0.0);
             }
         }
@@ -127,7 +150,7 @@ impl Scene {
     fn position(&self) -> f64 {
         self.sounds
             .values()
-            .filter_map(|sound| sound.handle.as_ref())
+            .flat_map(|sound| &sound.handles)
             .map(|handle| handle.position())
             .next()
             .unwrap_or(0.0)
@@ -157,6 +180,7 @@ impl Sound {
 
     pub fn from_data_v1(parent: &mut TrackHandle, data: v1::Sound) -> eyre::Result<Self> {
         let mut builder = TrackBuilder::new();
+        let delay = Delay::from_data_v1(&mut builder, data.delay);
         let reverb = Reverb::from_data_v1(&mut builder, data.reverb);
 
         Ok(Self {
@@ -170,6 +194,7 @@ impl Sound {
             name: data.name,
             gain: data.gain,
 
+            delay,
             reverb,
 
             kind: data.kind,
@@ -179,7 +204,7 @@ impl Sound {
 
             path: data.path,
 
-            handle: None,
+            handles: Vec::new(),
         })
     }
 
@@ -187,6 +212,7 @@ impl Sound {
         v1::Sound {
             name: self.name.clone(),
             gain: self.gain,
+            delay: self.delay.to_data_v1(),
             reverb: self.reverb.to_data_v1(),
             kind: self.kind,
             random: self.random.clone(),
@@ -210,9 +236,16 @@ impl Sound {
     }
 
     fn tick(&mut self) {
-        if self.kind == v1::Kind::Random
-            && rand::random::<f32>() < self.random.rate
-            && let Some(ref data) = self.data
+        if self.kind == v1::Kind::Random && rand::random::<f32>() < self.random.rate {
+            self.trigger();
+        }
+    }
+
+    fn trigger(&mut self) {
+        self.handles.retain(|h| h.state() != PlaybackState::Stopped);
+
+        if let Some(ref data) = self.data
+            && self.handles.len() < self.random.limit as usize
             && let Ok(mut handle) = self.track.play(data.clone())
         {
             if self.random.volume < 0.0 {
@@ -225,7 +258,7 @@ impl Sound {
                 handle.set_panning(panning, Default::default());
             }
 
-            self.handle = Some(handle);
+            self.handles.push(handle);
         }
     }
 
@@ -234,7 +267,7 @@ impl Sound {
             return;
         }
 
-        if let Some(ref mut handle) = self.handle {
+        if let Some(handle) = self.handles.first_mut() {
             if (handle.position() - position).abs() > 0.1 {
                 handle.seek_to(position);
             }
@@ -243,13 +276,39 @@ impl Sound {
         {
             handle.set_loop_region(..);
             handle.seek_to(position);
-            self.handle = Some(handle);
+            self.handles.push(handle);
         }
     }
 
     fn stop(&mut self) {
-        if let Some(mut handle) = self.handle.take() {
+        for mut handle in self.handles.drain(..) {
             handle.stop(Default::default());
+        }
+    }
+}
+
+impl Delay {
+    pub fn from_data_v1(builder: &mut TrackBuilder, data: v1::Delay) -> Self {
+        let handle = builder.add_effect(
+            DelayBuilder::new()
+                .delay_time(Duration::from_secs_f32(data.time))
+                .feedback(data.feedback)
+                .mix(data.mix),
+        );
+
+        Self {
+            handle,
+            time: data.time,
+            feedback: data.feedback,
+            mix: data.mix,
+        }
+    }
+
+    pub fn to_data_v1(&self) -> v1::Delay {
+        v1::Delay {
+            time: self.time,
+            feedback: self.feedback,
+            mix: self.mix,
         }
     }
 }
@@ -282,7 +341,7 @@ impl Reverb {
     }
 }
 
-pub fn scene(scene: &Scene) -> impl View<Scene> + Layout + use<> {
+pub fn scene(scene: &Scene) -> impl View<Scene> + StyleLayout + use<> {
     let name = row(textinput()
         .text(&scene.name)
         .placeholder("...")
@@ -308,7 +367,7 @@ pub fn right_bar(scene: &Scene) -> impl View<Scene> + use<> {
     sounds(scene)
 }
 
-fn sounds(scene: &Scene) -> impl View<Scene> + Layout + use<> {
+fn sounds(scene: &Scene) -> impl View<Scene> + StyleLayout + use<> {
     column(
         list(scene.sounds.len() + 1, |scene: &Scene, i| {
             if let Some(id) = scene.sounds.get_uuid(i) {
@@ -329,17 +388,9 @@ fn sounds(scene: &Scene) -> impl View<Scene> + Layout + use<> {
 fn add_sound() -> impl View<Scene> + use<> {
     row(button::button(icon::plus(), |scene: &mut Scene| {
         let _ = scene.add_sound();
-    }))
-    .justify_content(Justify::Center)
-}
-
-fn remove_sound(id: Uuid) -> impl View<Scene> + use<> {
-    button::button(icon::trash().tint(theme::RED), move |scene: &mut Scene| {
-        if let Some(mut sound) = scene.sounds.remove(id) {
-            sound.stop();
-        }
     })
-    .padding(6.0)
+    .tooltip(Some("Add new sound")))
+    .justify_content(Justify::Center)
 }
 
 fn sound(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
@@ -354,17 +405,27 @@ fn sound(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
         .flex(1.0);
 
     let properties = match sound.kind {
-        v1::Kind::Music => any(column(reverb_properties(id, sound))),
-        v1::Kind::Ambient => any(column(reverb_properties(id, sound))),
-        v1::Kind::Random => any(column((
-            random_properties(id, sound),
+        v1::Kind::Music => any(column((
+            delay_properties(id, sound),
             reverb_properties(id, sound),
         ))),
-        v1::Kind::Trigger => any(column(reverb_properties(id, sound))),
+        v1::Kind::Ambient => any(column((
+            delay_properties(id, sound),
+            reverb_properties(id, sound),
+        ))),
+        v1::Kind::Random => any(column((
+            random_properties(id, sound),
+            delay_properties(id, sound),
+            reverb_properties(id, sound),
+        ))),
+        v1::Kind::Trigger => any(column((
+            delay_properties(id, sound),
+            reverb_properties(id, sound),
+        ))),
     };
 
     let header = row((
-        row((expand(id, sound), remove_sound(id))),
+        row((expand_sound(id, sound), remove_sound(id))),
         row(name)
             .padding_bottom(-2.0)
             .border_bottom(1.0, theme::OUTLINE)
@@ -375,7 +436,15 @@ fn sound(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     .gap(12.0);
 
     let body = match sound.expand {
-        true => Some((row(kind(id, sound)), properties, select_file(id, sound))),
+        true => Some((
+            row((
+                kind(id, sound),
+                sound.kind.is_triggered().then(|| trigger_button(id)),
+            ))
+            .justify_content(Justify::SpaceBetween),
+            properties,
+            select_file(id, sound),
+        )),
         false => None,
     };
 
@@ -384,7 +453,28 @@ fn sound(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
         .background(theme::SURFACE)
 }
 
-fn expand(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+fn trigger_button(id: Uuid) -> impl View<Scene> + use<> {
+    button::button(
+        icon::play().size(24.0, 24.0).tint(theme::RED),
+        move |scene: &mut Scene| {
+            scene.sounds[id].trigger();
+        },
+    )
+    .tooltip("Play sound once")
+    .padding(6.0)
+}
+
+fn remove_sound(id: Uuid) -> impl View<Scene> + use<> {
+    button::button(icon::trash().tint(theme::RED), move |scene: &mut Scene| {
+        if let Some(mut sound) = scene.sounds.remove(id) {
+            sound.stop();
+        }
+    })
+    .tooltip("Remove")
+    .padding(6.0)
+}
+
+fn expand_sound(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     let icon = match sound.expand {
         true => icon::eye(),
         false => icon::eye_closed(),
@@ -396,6 +486,7 @@ fn expand(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
             scene.sounds[id].expand ^= true;
         },
     )
+    .tooltip("Show/Hide")
     .padding(6.0)
 }
 
@@ -414,6 +505,7 @@ fn kind(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
                     scene.sounds[id].set_kind(kind, position);
                 },
             )
+            .tooltip(kind.name())
             .padding(6.0)
         })
     };
@@ -451,6 +543,7 @@ fn random_properties(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     properties(
         "Random",
         (
+            random_limit(id, sound),
             random_rate(id, sound),
             random_volume(id, sound),
             random_panning(id, sound),
@@ -458,9 +551,23 @@ fn random_properties(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     )
 }
 
+fn random_limit(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "limit",
+        "How many times the sound can be played at once.",
+        sound.random.limit as f32,
+        1.0..=256.0,
+        Space::Log,
+        move |scene, value| {
+            scene.sounds[id].random.limit = value.round() as u32;
+        },
+    )
+}
+
 fn random_rate(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     property(
         "rate",
+        "How often the volume should be played, given in average number of seconds between plays.",
         1.0 / sound.random.rate,
         0.1..=500.0,
         Space::Log,
@@ -473,6 +580,7 @@ fn random_rate(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 fn random_volume(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     property(
         "volume",
+        "How much the volume should be randomized.",
         sound.random.volume,
         -60.0..=0.0,
         Space::Linear,
@@ -485,11 +593,70 @@ fn random_volume(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 fn random_panning(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     property(
         "panning",
+        "How much the panning should be randomized.",
         sound.random.panning,
         0.0..=1.0,
         Space::Linear,
         move |scene, value| {
             scene.sounds[id].random.panning = value;
+        },
+    )
+}
+
+fn delay_properties(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    properties(
+        "Delay",
+        (
+            delay_time(id, sound),
+            delay_feedback(id, sound),
+            delay_mix(id, sound),
+        ),
+    )
+}
+
+fn delay_time(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "time",
+        "The amount of time the input audio is delayed by.",
+        sound.delay.time,
+        0.01..=10.0,
+        Space::Log,
+        move |scene, value| {
+            scene.sounds[id].delay.time = value;
+        },
+    )
+}
+
+fn delay_feedback(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "feedback",
+        "The amount the volume is reduced each time.",
+        sound.delay.feedback,
+        -60.0..=0.0,
+        Space::Linear,
+        move |scene, value| {
+            scene.sounds[id].delay.feedback = value;
+            scene.sounds[id]
+                .delay
+                .handle
+                .set_feedback(value, Default::default());
+        },
+    )
+}
+
+fn delay_mix(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
+    property(
+        "mix",
+        "How much wet (processed) signal should be blended with the dry (unprocessed) signal.",
+        sound.delay.mix,
+        0.0..=1.0,
+        Space::Linear,
+        move |scene, value| {
+            scene.sounds[id].delay.mix = value;
+            scene.sounds[id]
+                .delay
+                .handle
+                .set_mix(value, Default::default());
         },
     )
 }
@@ -509,6 +676,7 @@ fn reverb_properties(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 fn reverb_feedback(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     property(
         "feedback",
+        "How much the room reverberates. Higher values result in bigger sounding rooms.",
         sound.reverb.feedback,
         0.0..=1.0,
         Space::Square,
@@ -525,6 +693,7 @@ fn reverb_feedback(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 fn reverb_damping(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     property(
         "damping",
+        "How quickly high frequencies disappear from the reverb.",
         sound.reverb.damping,
         0.0..=1.0,
         Space::Linear,
@@ -541,6 +710,7 @@ fn reverb_damping(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 fn reverb_width(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     property(
         "width",
+        "The stereo width of the reverb effect.",
         sound.reverb.width,
         0.0..=1.0,
         Space::Linear,
@@ -557,6 +727,7 @@ fn reverb_width(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 fn reverb_mix(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
     property(
         "mix",
+        "How much wet (processed) signal should be blended with the dry (unprocessed) signal.",
         sound.reverb.mix,
         0.0..=1.0,
         Space::Linear,
@@ -572,6 +743,7 @@ fn reverb_mix(id: Uuid, sound: &Sound) -> impl View<Scene> + use<> {
 
 fn property<F>(
     name: &'static str,
+    tooltip: &'static str,
     value: f32,
     range: RangeInclusive<f32>,
     space: Space,
@@ -583,9 +755,17 @@ where
     let on_input = Rc::new(on_input);
 
     memo(value, move |_| {
+        let text = if *range.start() <= 0.001 && *range.start() > 0.0 {
+            format!("{value:.3}")
+        } else if *range.start() <= 0.01 && *range.start() > 0.0 {
+            format!("{value:.2}")
+        } else {
+            format!("{value:.1}")
+        };
+
         row((
-            label(name).size(10.0).flex(3.0).flex_basis(0.0),
-            numberinput(&format!("{value:.1}"), {
+            tooltip::tooltip(tooltip, label(name).size(10.0).flex(3.0).flex_basis(0.0)),
+            numberinput(&text, {
                 let range = range.clone();
                 let on_input = on_input.clone();
 
@@ -608,7 +788,7 @@ where
                 .track_length(80.0)
                 .padding(8.0)
                 .flex(7.0)
-                .flex_basis(0.0)
+                .flex_basis(Length::Length(0.0))
                 .on_input(move |scene, value| {
                     let start = space.map(*range.start());
                     let end = space.map(*range.end());
@@ -741,7 +921,7 @@ fn mixer_track(sound: &Sound) -> impl View<Sound> + use<> {
     ))
 }
 
-fn section<T>(name: &str, content: impl View<T>) -> impl View<T> + Layout {
+fn section<T>(name: &str, content: impl View<T>) -> impl View<T> + StyleLayout {
     column((label(name), content))
         .min_width(0.0)
         .align_items(Align::Center)
@@ -761,7 +941,7 @@ fn gain_slider(name: &str, gain: f32) -> impl View<(f32, TrackHandle)> + use<> {
 
     let name = name.to_string();
 
-    memo(gain, move |_| {
+    memo((name.clone(), gain), move |_| {
         column((
             label(name)
                 .size(12.0)
@@ -771,6 +951,7 @@ fn gain_slider(name: &str, gain: f32) -> impl View<(f32, TrackHandle)> + use<> {
                 .value((gain - MIN) / RANGE)
                 .direction(Direction::Vertical)
                 .track_length(200.0)
+                .scrollable(true)
                 .on_input(|(gain, track): &mut (f32, TrackHandle), value| {
                     *gain = value * RANGE + MIN;
                     track.set_volume(*gain, Tween::default());

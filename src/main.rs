@@ -12,6 +12,7 @@ mod scene;
 mod slider;
 mod storage;
 mod theme;
+mod tooltip;
 mod uuid_map;
 
 fn main() -> eyre::Result<()> {
